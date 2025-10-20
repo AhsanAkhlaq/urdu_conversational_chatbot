@@ -1,6 +1,7 @@
 import streamlit as st
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import sentencepiece as sp
 import math
 
@@ -140,26 +141,16 @@ class Transformer(nn.Module):
                               padding_id=padding_idx)
         self.final_layer = nn.Linear(in_features=256, out_features=vocab_size)
 
-    def forward(self, src, tgt, padding_mask, teacher_forcing=0):
-        batch_len, tgt_len = tgt.shape
-        dec_input = tgt[:, 0:1]
+    def forward(self, src, tgt):
+        # Create masks
+        padding_mask = create_padding_mask(src, 0).to(src.device)
+        tgt_look_ahead_mask = create_look_ahead_mask(tgt.size(1)).to(src.device)
+        
+        # Forward pass
         enc_output = self.encoder(src, padding_mask)
-        outputs = []
+        dec_out = self.decoder(tgt, enc_output, tgt_look_ahead_mask, padding_mask)
+        output = self.final_layer(dec_out)
         
-        for i in range(0, tgt_len):
-            tgt_look_ahead_mask = create_look_ahead_mask(dec_input.size(1)).to(device)
-            dec_out = self.decoder(dec_input, enc_output, tgt_look_ahead_mask, padding_mask)
-            pred = self.final_layer(dec_out)
-            outputs.append(pred[:, -1:, :])
-            
-            if i < tgt_len - 1:
-                tf = torch.rand(batch_len, 1, device=device) < teacher_forcing
-                pred_t = pred[:, -1:, :].argmax(dim=-1)
-                ground_t = tgt[:, i+1:i+2]
-                next_t = torch.where(tf, ground_t, pred_t)
-                dec_input = torch.cat([dec_input, next_t], dim=1)
-        
-        output = torch.cat(outputs, dim=1)
         return output
 
 # Load model and tokenizer
@@ -167,53 +158,55 @@ class Transformer(nn.Module):
 def load_model_and_tokenizer():
     # Load tokenizer
     tokenizer = sp.SentencePieceProcessor()
-    tokenizer.Load('d:/Workspace/PYTHON/NLP/Project2/test-gpt-style-training/bpe_tokenizer.model')
+    tokenizer.Load('bpe_tokenizer.model')
     
     vocab_size = tokenizer.get_piece_size()
     pad_id = tokenizer.piece_to_id('<pad>')
+    sos_id = tokenizer.piece_to_id('<s>')
+    eos_id = tokenizer.piece_to_id('</s>')
     
     # Load model
     model = Transformer(vocab_size=vocab_size, padding_idx=pad_id).to(device)
-    checkpoint = torch.load('d:/Workspace/PYTHON/NLP/Project2/test-gpt-style-training/model_state.pth', map_location=device)
+    checkpoint = torch.load('model_state.pth', map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
-    return model, tokenizer, pad_id
+    return model, tokenizer, pad_id, sos_id, eos_id
 
-# Prediction function
-def predict(model, tokenizer, pad_id, input_text, max_len=50):
+# Updated prediction function with temperature-based sampling
+def generate_text(model, tokenizer, pad_id, sos_id, eos_id, input_text, max_length=30, temperature=0.8):
+    """Generate text continuation using temperature-based sampling"""
     model.eval()
+    
     with torch.no_grad():
         # Encode input
-        input_ids = tokenizer.encode(input_text)
-        input_tensor = torch.tensor([input_ids], dtype=torch.long).to(device)
+        token_ids = tokenizer.encode(input_text)
+        encoder_ids = token_ids[:50] + [pad_id] * (50 - len(token_ids))
+        encoder_input = torch.tensor([encoder_ids], dtype=torch.long).to(device)
+        decoder_input = torch.tensor([[sos_id]], dtype=torch.long).to(device)
         
-        # Create padding mask
-        padding_mask = create_padding_mask(input_tensor, pad_id).to(device)
-        
-        # Start with BOS token
-        decoder_input = torch.tensor([[tokenizer.piece_to_id('<s>')]], dtype=torch.long).to(device)
-        
-        # Generate output
-        for _ in range(max_len):
-            tgt_look_ahead_mask = create_look_ahead_mask(decoder_input.size(1)).to(device)
-            enc_output = model.encoder(input_tensor, padding_mask)
-            dec_out = model.decoder(decoder_input, enc_output, tgt_look_ahead_mask, padding_mask)
-            pred = model.final_layer(dec_out)
+        generated_tokens = []
+        for _ in range(max_length):
+            output = model(encoder_input, decoder_input)
+            next_token_logits = output[0, -1, :] / temperature
+            probs = F.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
             
-            next_token = pred[:, -1:, :].argmax(dim=-1)
-            
-            # Check for EOS token
-            if next_token.item() == tokenizer.piece_to_id('</s>'):
+            if next_token.item() == eos_id:
                 break
-                
-            decoder_input = torch.cat([decoder_input, next_token], dim=1)
+            
+            generated_tokens.append(next_token.item())
+            decoder_input = torch.cat([decoder_input, next_token.unsqueeze(0)], dim=1)
         
         # Decode output
-        output_ids = decoder_input[0].cpu().tolist()
-        output_text = tokenizer.decode(output_ids)
+        output_tokens = []
+        for idx in generated_tokens:
+            if idx not in [pad_id, sos_id, eos_id]:
+                token = tokenizer.id_to_piece(idx)
+                output_tokens.append(token)
         
-        return output_text
+        text = ''.join(output_tokens).replace('▁', ' ')
+        return text.strip()
 
 # Streamlit UI
 st.title("🔤 Urdu Span Corruption Transformer")
@@ -221,7 +214,7 @@ st.markdown("### Fill in the masked spans in Urdu text")
 
 # Load model
 try:
-    model, tokenizer, pad_id = load_model_and_tokenizer()
+    model, tokenizer, pad_id, sos_id, eos_id = load_model_and_tokenizer()
     st.success(f"✓ Model loaded successfully! (Device: {device})")
 except Exception as e:
     st.error(f"Error loading model: {str(e)}")
@@ -234,17 +227,26 @@ st.markdown("#### Input Text")
 input_text = st.text_area(
     "Corrupted Text",
     height=100,
-    placeholder="Enter Urdu text ...",
+    placeholder="Enter Urdu text with masked spans...",
 )
 
-max_length = st.slider("Maximum output length", 1, 20, 5)
+col1, col2 = st.columns(2)
+with col1:
+    max_length = st.slider("Maximum output length", 1, 50, 30)
+with col2:
+    temperature = st.slider("Temperature", 0.1, 2.0, 0.8, 0.1)
+
+st.caption("Higher temperature = more random/creative output")
 
 # Prediction
 if st.button("Generate", type="primary"):
     if input_text.strip():
         with st.spinner("Generating..."):
             try:
-                output = predict(model, tokenizer, pad_id, input_text, max_len=max_length)
+                output = generate_text(
+                    model, tokenizer, pad_id, sos_id, eos_id, 
+                    input_text, max_length=max_length, temperature=temperature
+                )
                 
                 st.markdown("---")
                 st.markdown("#### Results")
