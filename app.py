@@ -7,15 +7,15 @@ import math
 
 # Set page config
 st.set_page_config(
-    page_title="Urdu Span Corruption Model",
-    page_icon="🔤",
+    page_title="Urdu Conversational Chatbot",
+    page_icon="🤖",
     layout="centered"
 )
 
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-# Model Architecture
+# Model Architecture (keeping your existing architecture)
 class PositionalEncoding(nn.Module):
     """Positional encoding using sine and cosine"""
     def __init__(self, d_model, max_len=5000, dropout=0.1):
@@ -174,14 +174,12 @@ class Transformer(nn.Module):
         src_mask = self.make_src_mask(src)
         tgt_mask = self.make_tgt_mask(tgt)
         
-        # Encoder
         x = self.encoder_embedding(src) * math.sqrt(self.d_model)
         x = self.encoder_pos_encoding(x)
         for layer in self.encoder_layers:
             x = layer(x, src_mask)
         encoder_output = x
         
-        # Decoder
         x = self.decoder_embedding(tgt) * math.sqrt(self.d_model)
         x = self.decoder_pos_encoding(x)
         for layer in self.decoder_layers:
@@ -193,7 +191,6 @@ class Transformer(nn.Module):
 # Load model and tokenizer
 @st.cache_resource
 def load_model_and_tokenizer():
-    # Load tokenizer
     tokenizer = sp.SentencePieceProcessor()
     tokenizer.Load('bpe_tokenizer.model')
     
@@ -202,7 +199,6 @@ def load_model_and_tokenizer():
     sos_id = tokenizer.piece_to_id('<s>')
     eos_id = tokenizer.piece_to_id('</s>')
     
-    # Load model
     model = Transformer(
         vocab_size=vocab_size,
         d_model=512,
@@ -221,13 +217,12 @@ def load_model_and_tokenizer():
     
     return model, tokenizer, pad_id, sos_id, eos_id
 
-# Generation function with temperature-based sampling
+# Generation function
 def generate_text(model, tokenizer, pad_id, sos_id, eos_id, input_text, max_length=30, temperature=0.8):
     """Generate text continuation using temperature-based sampling"""
     model.eval()
     
     with torch.no_grad():
-        # Encode input
         token_ids = tokenizer.encode(input_text)
         encoder_ids = token_ids[:50] + [pad_id] * (50 - len(token_ids))
         encoder_input = torch.tensor([encoder_ids], dtype=torch.long).to(device)
@@ -246,7 +241,6 @@ def generate_text(model, tokenizer, pad_id, sos_id, eos_id, input_text, max_leng
             generated_tokens.append(next_token.item())
             decoder_input = torch.cat([decoder_input, next_token.unsqueeze(0)], dim=1)
         
-        # Decode output
         output_tokens = []
         for idx in generated_tokens:
             if idx not in [pad_id, sos_id, eos_id]:
@@ -256,67 +250,123 @@ def generate_text(model, tokenizer, pad_id, sos_id, eos_id, input_text, max_leng
         text = ''.join(output_tokens).replace('▁', ' ')
         return text.strip()
 
-# Streamlit UI
-st.title("🔤 Urdu Span Corruption Transformer")
-st.markdown("### Fill in the masked spans in Urdu text")
+# Custom CSS for chat interface
+st.markdown("""
+<style>
+    .main {
+        background-color: #f5f5f5;
+    }
+    .chat-message {
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+        display: flex;
+        flex-direction: column;
+    }
+    .user-message {
+        background-color: #ff5252;
+        color: white;
+        margin-left: 20%;
+        text-align: right;
+    }
+    .bot-message {
+        background-color: green;
+        color: white;
+        margin-right: 20%;
+    }
+    .stTextInput > div > div > input {
+        background-color: #e8e8e8;
+        border-radius: 25px;
+        padding: 12px 20px;
+        border: none;
+    }
+    .header-title {
+        text-align: left;
+        padding: 1rem;
+        font-size: 2rem;
+        font-weight: bold;
+        color: #333;
+    }
+    .subtitle {
+        text-align: left;
+        padding: 0 1rem 1rem 1rem;
+        color: #666;
+        font-size: 0.95rem;
+    }
+    div[data-testid="stVerticalBlock"] > div:has(> div.chat-message) {
+        gap: 0.5rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Initialize session state for chat history
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+if 'model_loaded' not in st.session_state:
+    st.session_state.model_loaded = False
+
+# Header
+st.markdown('<div class="header-title">🤖 Urdu Conversational Chatbot</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">This chatbot uses a custom Transformer architecture to generate Urdu text responses. Try typing some Urdu text below and see how it responds!</div>', unsafe_allow_html=True)
 
 # Load model
-try:
-    model, tokenizer, pad_id, sos_id, eos_id = load_model_and_tokenizer()
-    st.success(f"✓ Model loaded successfully! (Device: {device})")
-except Exception as e:
-    st.error(f"Error loading model: {str(e)}")
-    st.stop()
+if not st.session_state.model_loaded:
+    try:
+        with st.spinner("Loading model..."):
+            model, tokenizer, pad_id, sos_id, eos_id = load_model_and_tokenizer()
+            st.session_state.model = model
+            st.session_state.tokenizer = tokenizer
+            st.session_state.pad_id = pad_id
+            st.session_state.sos_id = sos_id
+            st.session_state.eos_id = eos_id
+            st.session_state.model_loaded = True
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        st.stop()
 
-# Input section
-st.markdown("---")
-st.markdown("#### Input Text")
+# Display chat history
+chat_container = st.container()
+with chat_container:
+    for message in st.session_state.messages:
+        if message["role"] == "user":
+            st.markdown(f'<div class="chat-message user-message">🧑 {message["content"]}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="chat-message bot-message">🤖 {message["content"]}</div>', unsafe_allow_html=True)
 
-input_text = st.text_area(
-    "Corrupted Text",
-    height=100,
-    placeholder="Enter Urdu text with masked spans...",
-)
-
-col1, col2 = st.columns(2)
-with col1:
-    max_length = st.slider("Maximum output length", 1, 50, 30)
-with col2:
+# Settings in sidebar
+with st.sidebar:
+    st.header("⚙️ Settings")
+    max_length = st.slider("Maximum output length", 10, 50, 30)
     temperature = st.slider("Temperature", 0.1, 2.0, 0.8, 0.1)
+    st.caption("Higher temperature = more creative output")
+    
+    st.markdown("---")
+    if st.button("🗑️ Clear Chat History"):
+        st.session_state.messages = []
+        st.rerun()
 
-st.caption("Higher temperature = more random/creative output")
+# Input area
+user_input = st.chat_input("...اردو میں کچھ لکھیں (Type something in Urdu)")
 
-# Prediction
-if st.button("Generate", type="primary"):
-    if input_text.strip():
-        with st.spinner("Generating..."):
-            try:
-                output = generate_text(
-                    model, tokenizer, pad_id, sos_id, eos_id, 
-                    input_text, max_length=max_length, temperature=temperature
-                )
-                
-                st.markdown("---")
-                st.markdown("#### Results")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Input:**")
-                    st.info(input_text)
-                
-                with col2:
-                    st.markdown("**Output:**")
-                    st.success(output)
-                    
-            except Exception as e:
-                st.error(f"Error during prediction: {str(e)}")
-    else:
-        st.warning("Please enter some text first!")
-
-
-# Footer
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray;'>Urdu Span Corruption Model | Built with PyTorch & Streamlit</div>",
-    unsafe_allow_html=True
-)
+if user_input:
+    # Add user message to chat
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    
+    # Generate bot response
+    with st.spinner("جواب تیار کیا جا رہا ہے... (Generating response...)"):
+        try:
+            bot_response = generate_text(
+                st.session_state.model,
+                st.session_state.tokenizer,
+                st.session_state.pad_id,
+                st.session_state.sos_id,
+                st.session_state.eos_id,
+                user_input,
+                max_length=max_length,
+                temperature=temperature
+            )
+            st.session_state.messages.append({"role": "bot", "content": bot_response})
+        except Exception as e:
+            st.error(f"Error generating response: {str(e)}")
+    
+    st.rerun()
